@@ -1,0 +1,119 @@
+name: claude-agent-box
+
+x-proxy-env: &proxy-env
+  HTTP_PROXY: http://proxy:3128
+  HTTPS_PROXY: http://proxy:3128
+  http_proxy: http://proxy:3128
+  https_proxy: http://proxy:3128
+  # Without this, the agent's requests to sibling services get sent to squid
+  # and denied. Claude Code honours NO_PROXY (space- or comma-separated).
+  NO_PROXY: localhost,127.0.0.1,dind,proxy,preview,.local
+  no_proxy: localhost,127.0.0.1,dind,proxy,preview,.local
+
+services:
+  proxy:
+    image: ubuntu/squid
+    volumes:
+      - ./squid.conf:/etc/squid/squid.conf:ro
+    networks: [isolated, internet]
+    restart: unless-stopped
+    sysctls:
+      # dns_v4_first is obsolete/ignored in Squid 6.x (see cache.log). This
+      # container has no real IPv6 route, so without this squid still tries
+      # AAAA first, the connect hangs/aborts, and it reads like a 503 outage.
+      - net.ipv6.conf.all.disable_ipv6=1
+    healthcheck:
+      # depends_on alone only waits for the container to START. Squid needs a
+      # moment to parse the config and bind; without this the agent's first
+      # requests fail with connection refused.
+      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/3128' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  agent:
+    build: .
+    depends_on:
+      proxy:
+        condition: service_healthy
+      dind:
+        condition: service_healthy
+    init: true
+    environment:
+      <<: *proxy-env
+      TERM: xterm-256color
+      DOCKER_HOST: tcp://dind:2375
+      # ANTHROPIC_API_KEY deliberately absent — see README.
+    volumes:
+      - ${WORKSPACE:-./workspace}:/workspace
+      - claude-home:/home/node          # replaces the read-only host mounts
+    working_dir: /workspace
+    networks: [isolated]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    ulimits:
+      nofile: { soft: 8192, hard: 8192 }
+    deploy:
+      resources:
+        limits:
+          cpus: "${AGENT_CPUS:-2}"
+          memory: "${AGENT_MEMORY:-4g}"
+          # Not top-level `pids_limit`: Compose v2 normalizes that to this same
+          # key and rejects the project if a `deploy.resources.limits` block is
+          # also present. A memory cap alone doesn't stop a fork bomb.
+          pids: 512
+    # Container outlives any one `claude` process, so `docker compose exec`
+    # back in whenever — no need to keep a terminal attached.
+    command: ["sleep", "infinity"]
+
+  # Docker daemon the agent drives. On `isolated`, so its image pulls go
+  # through squid too — uncomment the .docker.io lines in squid.conf.
+  dind:
+    image: docker:27-dind
+    privileged: true
+    depends_on:
+      proxy:
+        condition: service_healthy
+    environment:
+      <<: *proxy-env
+      DOCKER_TLS_CERTDIR: ""
+    command: ["--host=tcp://0.0.0.0:2375", "--host=unix:///var/run/docker.sock"]
+    volumes:
+      # SAME host path, SAME container path as the agent. The dind daemon
+      # resolves bind mounts against its own filesystem, not the agent's.
+      - ${WORKSPACE:-./workspace}:/workspace
+      - dind-storage:/var/lib/docker
+    networks: [isolated]
+    healthcheck:
+      test: ["CMD", "docker", "info"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  # Static reverse proxy so you can open the app from the host/phone without
+  # giving dind (and therefore the agent) a route to the internet.
+  # The agent cannot execute anything in here.
+  preview:
+    image: caddy:2-alpine
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    networks: [isolated, preview_net]
+    ports:
+      - "3000:3000"
+      - "5173:5173"
+      - "9900:8000"
+
+volumes:
+  claude-home:
+  dind-storage:
+
+networks:
+  isolated:
+    internal: true
+  internet:
+    driver: bridge
+  preview_net:
+    driver: bridge

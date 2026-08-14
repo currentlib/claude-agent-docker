@@ -1,0 +1,11 @@
+# Static reverse proxy: host/phone -> app containers running inside dind.
+# Add a block per port you publish in docker-compose.yml.
+:3000 {
+	reverse_proxy dind:3000
+}
+:5173 {
+	reverse_proxy dind:5173
+}
+:8000 {
+	reverse_proxy dind:8000
+}
