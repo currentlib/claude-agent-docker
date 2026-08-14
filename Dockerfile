@@ -16,11 +16,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \
   && rm -rf /var/lib/apt/lists/*
 
-# Seed content goes somewhere the /workspace bind mount can't mask it.
-# Your `COPY lattice-claude-base/ .` into /workspace was silently discarded at
-# runtime, and what did land was root-owned while the process runs as `node`.
-#COPY --chown=node:node lattice-claude-base/ /opt/base/
-
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Pin it. `latest` means your image is not reproducible and a bad release
